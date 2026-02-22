@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>Mini Expense Tracker · fully responsive</title>
+    <!-- Tailwind for rapid, responsive layout -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome icons (free) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Chart.js for pie chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- jsPDF + autoTable for PDF monthly report -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+    <style>
+        /* subtle custom for better touch usability */
+        .card-hover { transition: all 0.15s ease; }
+        .card-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 20px rgba(0,0,0,0.05); }
+        .form-input:focus { ring: 2px solid #3b82f6; border-color: #3b82f6; }
+        /* mobile tap highlights */
+        button, a { -webkit-tap-highlight-color: rgba(0,0,0,0.05); }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans antialiased">
+
+<!-- main app container -->
+<div id="app" class="min-h-screen flex flex-col items-center p-4 md:p-6 max-w-6xl mx-auto w-full"></div>
+
+<!-- JavaScript (everything client-side, localStorage as DB) -->
+<script>
+(function() {
+    // ---------- configuration & constants ----------
+    const STORAGE_KEYS = { USERS: 'expense_tracker_users', TRANSACTIONS: 'expense_tracker_transactions', CURRENT_USER: 'expense_tracker_current' };
+    const CATEGORIES = ['Food', 'Transport', 'Shopping', 'Entertainment', 'Bills', 'Other'];
+    const DEMO_USER = { id: 'demo1', username: 'demo', password: 'demo', email: 'demo@example.com' }; // plain for demo
+
+    // ---------- simple hashing (for demo only – never use in production) ----------
+    function simpleHash(str) {
+        if (!str) return '';
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) { hash = (hash << 5) - hash + str.charCodeAt(i); hash |= 0; }
+        return hash.toString(16);
+    }
+
+    // ---------- localStorage helpers ----------
+    function getUsers() { return JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || '[]'); }
+    function saveUsers(users) { localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users)); }
+    function getTransactions() { return JSON.parse(localStorage.getItem(STORAGE_KEYS.TRANSACTIONS) || '[]'); }
+    function saveTransactions(txs) { localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(txs)); }
+    function getCurrentUser() { 
+        const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
+        return raw ? JSON.parse(raw) : null;
+    }
+    function setCurrentUser(user) { 
+        if (user) localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+        else localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+    }
+
+    // ---------- seed data (if empty) ----------
+    function seedInitialData() {
+        let users = getUsers();
+        let txs = getTransactions();
+        if (users.length === 0) {
+            const demoUser = { ...DEMO_USER, id: 'u_' + Date.now(), password: simpleHash(DEMO_USER.password) };
+            users.push(demoUser);
+            saveUsers(users);
+            // seed 8 transactions for demo
+            const demoId = demoUser.id;
+            const today = new Date();
+            const twoMonthsAgo = new Date(today.getFullYear(), today.getMonth()-1, 5).toISOString().split('T')[0];
+            const lastMonth = new Date(today.getFullYear(), today.getMonth()-1, 15).toISOString().split('T')[0];
+            const thisMonth = new Date(today.getFullYear(), today.getMonth(), 10).toISOString().split('T')[0];
+            const seedTransactions = [
+                { id: 't1', userId: demoId, type: 'income', amount: 3200, category: 'Other', date: thisMonth, description: 'Salary' },
+                { id: 't2', userId: demoId, type: 'expense', amount: 450, category: 'Food', date: lastMonth, description: 'Groceries' },
+                { id: 't3', userId: demoId, type: 'expense', amount: 120, category: 'Transport', date: lastMonth, description: 'Uber' },
+                { id: 't4', userId: demoId, type: 'expense', amount: 85, category: 'Entertainment', date: twoMonthsAgo, description: 'Netflix' },
+                { id: 't5', userId: demoId, type: 'expense', amount: 200, category: 'Shopping', date: thisMonth, description: 'Clothes' },
+                { id: 't6', userId: demoId, type: 'income', amount: 150, category: 'Other', date: thisMonth, description: 'Freelance' },
+                { id: 't7', userId: demoId, type: 'expense', amount: 90, category: 'Food', date: thisMonth, description: 'Restaurant' },
+                { id: 't8', userId: demoId, type: 'expense', amount: 600, category: 'Bills', date: lastMonth, description: 'Electricity' },
+            ];
+            txs.push(...seedTransactions);
+            saveTransactions(txs);
+        }
+    }
+    seedInitialData();
+
+    // ---------- global state ----------
+    let currentUser = getCurrentUser();
+    let transactions = currentUser ? getTransactions().filter(t => t.userId === currentUser.id) : [];
+    let chartInstance = null;      // holds the pie chart
+    let editingId = null;          // for transaction update
+
+    // ---------- helper: get user by username (plaintext pwd match for demo) ----------
+    function authenticateUser(username, password) {
+        const users = getUsers();
+        const hashed = simpleHash(password);
+        return users.find(u => u.username === username && u.password === hashed) || null;
+    }
+
+    // ---------- render entry point ----------
+    function renderApp() {
+        const appDiv = document.getElementById('app');
+        if (!appDiv) return;
+        if (!currentUser) {
+            appDiv.innerHTML = renderAuthScreen();
+            attachAuthListeners();
+        } else {
+            appDiv.innerHTML = renderDashboard();
+            attachDashboardListeners();
+            updateDashboardData();  // summary, chart, list
+        }
+    }
+
+    // ---------- AUTH SCREEN (login / register) ----------
+    function renderAuthScreen() {
+        return `
+            <div class="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 md:p-8 mt-10">
+                <h1 class="text-3xl font-bold text-center text-gray-800 mb-2">💸 Mini Expense</h1>
+                <p class="text-center text-gray-500 mb-6">track income & expenses · secure demo</p>
+                
+                <!-- tabs -->
+                <div class="flex border-b border-gray-200 mb-6">
+                    <button id="auth-login-tab" class="flex-1 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600">Login</button>
+                    <button id="auth-register-tab" class="flex-1 py-2 text-sm font-medium text-gray-500">Register</button>
+                </div>
+
+                <!-- login form (active by default) -->
+                <div id="login-form" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                        <input type="text" id="login-username" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-200" placeholder="demo">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                        <input type="password" id="login-password" class="w-full px-4 py-2 border border-gray-300 rounded-lg" placeholder="••••••">
+                    </div>
+                    <button id="login-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded-lg transition">Sign in</button>
+                    <p class="text-xs text-gray-400 text-center mt-2">demo: demo / demo</p>
+                </div>
+
+                <!-- register form (hidden initially) -->
+                <div id="register-form" class="space-y-4 hidden">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                        <input type="text" id="reg-username" class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                        <input type="email" id="reg-email" class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                        <input type="password" id="reg-password" class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <button id="register-btn" class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded-lg">Create account</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function attachAuthListeners() {
+        const loginTab = document.getElementById('auth-login-tab');
+        const regTab = document.getElementById('auth-register-tab');
+        const loginDiv = document.getElementById('login-form');
+        const regDiv = document.getElementById('register-form');
+        if (loginTab && regTab && loginDiv && regDiv) {
+            loginTab.addEventListener('click', () => {
+                loginTab.classList.add('text-blue-600', 'border-b-2', 'border-blue-600');
+                regTab.classList.remove('text-blue-600', 'border-b-2', 'border-blue-600');
+                regTab.classList.add('text-gray-500');
+                loginDiv.classList.remove('hidden');
+                regDiv.classList.add('hidden');
+            });
+            regTab.addEventListener('click', () => {
+                regTab.classList.add('text-blue-600', 'border-b-2', 'border-blue-600');
+                loginTab.classList.remove('text-blue-600', 'border-b-2', 'border-blue-600');
+                loginTab.classList.add('text-gray-500');
+                regDiv.classList.remove('hidden');
+                loginDiv.classList.add('hidden');
+            });
+        }
+
+        document.getElementById('login-btn')?.addEventListener('click', () => {
+            const username = document.getElementById('login-username')?.value.trim();
+            const pwd = document.getElementById('login-password')?.value.trim();
+            if (!username || !pwd) return alert('Please fill both fields');
+            const user = authenticateUser(username, pwd);
+            if (user) {
+                setCurrentUser(user);
+                currentUser = user;
+                transactions = getTransactions().filter(t => t.userId === user.id);
+                renderApp();
+            } else {
+                alert('Invalid credentials (try demo/demo)');
+            }
+        });
+
+        document.getElementById('register-btn')?.addEventListener('click', () => {
+            const username = document.getElementById('reg-username')?.value.trim();
+            const email = document.getElementById('reg-email')?.value.trim();
+            const pwd = document.getElementById('reg-password')?.value.trim();
+            if (!username || !email || !pwd) return alert('All fields required');
+            const users = getUsers();
+            if (users.find(u => u.username === username)) return alert('Username exists');
+            const newUser = { id: 'u_' + Date.now() + Math.random(), username, email, password: simpleHash(pwd) };
+            users.push(newUser);
+            saveUsers(users);
+            setCurrentUser(newUser);
+            currentUser = newUser;
+            transactions = [];
+            renderApp();
+        });
+    }
+
+    // ---------- DASHBOARD (main app) ----------
+    function renderDashboard() {
+        const month = new Date().toISOString().slice(0,7); // YYYY-MM for PDF default
+        return `
+            <div class="w-full">
+                <!-- header -->
+                <div class="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-xl shadow-sm mb-5">
+                    <div class="flex items-center gap-2">
+                        <span class="text-2xl">📊</span>
+                        <span class="font-semibold text-gray-700">Hello, ${currentUser?.username}</span>
+                    </div>
+                    <button id="logout-btn" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded-lg text-sm font-medium"><i class="fas fa-sign-out-alt mr-1"></i>Logout</button>
+                </div>
+
+                <!-- summary cards -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                    <div class="bg-white p-5 rounded-2xl shadow-sm border-l-4 border-green-500 card-hover">
+                        <p class="text-sm text-gray-500">💰 Total Income</p>
+                        <p id="summary-income" class="text-2xl font-bold text-green-600">$0</p>
+                    </div>
+                    <div class="bg-white p-5 rounded-2xl shadow-sm border-l-4 border-red-500 card-hover">
+                        <p class="text-sm text-gray-500">💸 Total Expense</p>
+                        <p id="summary-expense" class="text-2xl font-bold text-red-500">$0</p>
+                    </div>
+                    <div class="bg-white p-5 rounded-2xl shadow-sm border-l-4 border-blue-500 card-hover">
+                        <p class="text-sm text-gray-500">⚖️ Balance</p>
+                        <p id="summary-balance" class="text-2xl font-bold text-blue-600">$0</p>
+                    </div>
+                </div>
+
+                <!-- add/edit transaction form -->
+                <div class="bg-white p-5 rounded-xl shadow-sm mb-6">
+                    <h2 class="text-lg font-semibold mb-3 flex items-center gap-2"><i class="fas fa-pen"></i> ${editingId ? 'Edit transaction' : 'Add new'}</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+                        <div class="md:col-span-1">
+                            <label class="text-xs text-gray-500">Type</label>
+                            <select id="tx-type" class="w-full p-2 border rounded-lg text-sm">
+                                <option value="expense">Expense</option>
+                                <option value="income">Income</option>
+                            </select>
+                        </div>
+                        <div class="md:col-span-1">
+                            <label class="text-xs text-gray-500">Category</label>
+                            <select id="tx-category" class="w-full p-2 border rounded-lg text-sm">
+                                ${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="md:col-span-1">
+                            <label class="text-xs text-gray-500">Amount ($)</label>
+                            <input type="number" id="tx-amount" step="0.01" min="0.01" class="w-full p-2 border rounded-lg text-sm" placeholder="0.00">
+                        </div>
+                        <div class="md:col-span-1">
+                            <label class="text-xs text-gray-500">Date</label>
+                            <input type="date" id="tx-date" class="w-full p-2 border rounded-lg text-sm">
+                        </div>
+                        <div class="md:col-span-1">
+                            <label class="text-xs text-gray-500">Description</label>
+                            <input type="text" id="tx-desc" class="w-full p-2 border rounded-lg text-sm" placeholder="coffee">
+                        </div>
+                        <div class="md:col-span-1 flex gap-2">
+                            <button id="tx-submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm flex-1"><i class="fas fa-save mr-1"></i>Save</button>
+                            ${editingId ? '<button id="tx-cancel-edit" class="bg-gray-400 hover:bg-gray-500 text-white px-3 py-2 rounded-lg text-sm">✖</button>' : ''}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- chart & filter row -->
+                <div class="flex flex-col lg:flex-row gap-5 mb-6">
+                    <!-- pie chart card (expense categories) -->
+                    <div class="bg-white p-4 rounded-xl shadow-sm lg:w-1/2">
+                        <h3 class="font-medium text-gray-700 mb-2"><i class="fas fa-chart-pie mr-1"></i>Expenses by category</h3>
+                        <canvas id="expenseChart" width="300" height="240" class="w-full max-h-64"></canvas>
+                    </div>
+                    <!-- filters & export -->
+                    <div class="bg-white p-4 rounded-xl shadow-sm lg:w-1/2 flex flex-col gap-4">
+                        <div>
+                            <label class="block text-sm text-gray-500 mb-1">🔍 Filter by category</label>
+                            <select id="filter-category" class="w-full p-2 border rounded-lg">
+                                <option value="ALL">All categories</option>
+                                ${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button id="export-csv" class="bg-indigo-100 hover:bg-indigo-200 text-indigo-800 p-3 rounded-lg text-sm font-medium"><i class="fas fa-file-csv mr-1"></i>CSV (all)</button>
+                            <button id="export-pdf-btn" class="bg-red-100 hover:bg-red-200 text-red-800 p-3 rounded-lg text-sm font-medium"><i class="fas fa-file-pdf mr-1"></i>PDF report</button>
+                        </div>
+                        <div class="flex items-center gap-2 mt-1">
+                            <label class="text-sm text-gray-600">Month for PDF:</label>
+                            <input type="month" id="pdf-month" value="${month}" class="border p-1 rounded text-sm flex-1">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- transaction list -->
+                <div class="bg-white rounded-xl shadow-sm p-4">
+                    <h3 class="font-semibold text-gray-800 mb-3"><i class="fas fa-list-ul mr-2"></i>Transactions</h3>
+                    <div id="transaction-list" class="space-y-2 max-h-96 overflow-y-auto pr-1"></div>
+                    <p id="tx-empty-msg" class="text-gray-400 text-center py-4 hidden">No transactions yet.</p>
+                </div>
+            </div>
+        `;
+    }
+
+    // attach all dashboard event listeners
+    function attachDashboardListeners() {
+        document.getElementById('logout-btn')?.addEventListener('click', () => {
+            setCurrentUser(null);
+            currentUser = null;
+            transactions = [];
+            editingId = null;
+            renderApp();
+        });
+
+        // form submit (add / update)
+        document.getElementById('tx-submit')?.addEventListener('click', handleTransactionSubmit);
+        if (document.getElementById('tx-cancel-edit')) {
+            document.getElementById('tx-cancel-edit')?.addEventListener('click', () => {
+                editingId = null;
+                renderApp(); // re-render dashboard (edit mode off)
+            });
+        }
+
+        document.getElementById('export-csv')?.addEventListener('click', exportCSV);
+        document.getElementById('export-pdf-btn')?.addEventListener('click', exportPDF);
+        document.getElementById('filter-category')?.addEventListener('change', () => {
+            renderTransactionList(); // just re-render list based on filter
+        });
+    }
+
+    // ---------- CRUD & update UI ----------
+    function handleTransactionSubmit() {
+        const type = document.getElementById('tx-type')?.value;
+        const category = document.getElementById('tx-category')?.value;
+        const amount = parseFloat(document.getElementById('tx-amount')?.value);
+        const date = document.getElementById('tx-date')?.value;
+        const desc = document.getElementById('tx-desc')?.value.trim();
+
+        if (!amount || amount <= 0) return alert('Amount must be positive');
+        if (!date) return alert('Pick a date');
+        if (!desc) return alert('Description required');
+        if (!currentUser) return;
+
+        const newTx = {
+            id: editingId || 'tx_' + Date.now() + Math.random().toString(36).substr(2, 6),
+            userId: currentUser.id,
+            type,
+            amount,
+            category,
+            date,
+            description: desc
+        };
+
+        let allTxs = getTransactions();
+        if (editingId) {
+            // update existing
+            allTxs = allTxs.map(t => t.id === editingId ? newTx : t);
+        } else {
+            allTxs.push(newTx);
+        }
+        saveTransactions(allTxs);
+        transactions = allTxs.filter(t => t.userId === currentUser.id);
+        editingId = null;
+        renderApp(); // full re-render to reset form & chart
+    }
+
+    function deleteTransaction(id) {
+        if (!confirm('Delete transaction?')) return;
+        let allTxs = getTransactions().filter(t => t.id !== id);
+        saveTransactions(allTxs);
+        transactions = allTxs.filter(t => t.userId === currentUser?.id);
+        renderApp();
+    }
+
+    function startEditTransaction(id) {
+        const tx = transactions.find(t => t.id === id);
+        if (!tx) return;
+        editingId = tx.id;
+        // rerender dashboard with edit mode, then populate fields
+        renderApp();
+        // after DOM update, fill form
+        setTimeout(() => {
+            if (editingId) {
+                document.getElementById('tx-type').value = tx.type;
+                document.getElementById('tx-category').value = tx.category;
+                document.getElementById('tx-amount').value = tx.amount;
+                document.getElementById('tx-date').value = tx.date;
+                document.getElementById('tx-desc').value = tx.description;
+            }
+        }, 50);
+    }
+
+    // summary and chart update
+    function updateDashboardData() {
+        const income = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+        const expense = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+        document.getElementById('summary-income').innerText = `$${income.toFixed(2)}`;
+        document.getElementById('summary-expense').innerText = `$${expense.toFixed(2)}`;
+        document.getElementById('summary-balance').innerText = `$${(income - expense).toFixed(2)}`;
+
+        updateChart();
+        renderTransactionList();
+    }
+
+    function updateChart() {
+        const ctx = document.getElementById('expenseChart')?.getContext('2d');
+        if (!ctx) return;
+        if (chartInstance) chartInstance.destroy();
+
+        const expensesByCat = CATEGORIES.map(cat => {
+            return transactions.filter(t => t.type === 'expense' && t.category === cat).reduce((s, t) => s + t.amount, 0);
+        });
+        const hasData = expensesByCat.some(v => v > 0);
+        if (!hasData) {
+            chartInstance = new Chart(ctx, {
+                type: 'pie',
+                data: { labels: ['No expenses'], datasets: [{ data: [1], backgroundColor: ['#ccc'] }] },
+                options: { responsive: true, plugins: { legend: { display: false } } }
+            });
+            return;
+        }
+        chartInstance = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: CATEGORIES,
+                datasets: [{
+                    data: expensesByCat,
+                    backgroundColor: ['#f87171', '#60a5fa', '#fbbf24', '#c084fc', '#34d399', '#94a3b8'],
+                }]
+            },
+            options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+        });
+    }
+
+    function renderTransactionList() {
+        const container = document.getElementById('transaction-list');
+        const emptyMsg = document.getElementById('tx-empty-msg');
+        if (!container) return;
+        const filterCat = document.getElementById('filter-category')?.value || 'ALL';
+        let filtered = [...transactions];
+        if (filterCat !== 'ALL') filtered = filtered.filter(t => t.category === filterCat);
+        filtered.sort((a,b) => new Date(b.date) - new Date(a.date)); // latest first
+
+        if (filtered.length === 0) {
+            container.innerHTML = '';
+            if (emptyMsg) emptyMsg.classList.remove('hidden');
+            return;
+        }
+        if (emptyMsg) emptyMsg.classList.add('hidden');
+        container.innerHTML = filtered.map(tx => `
+            <div class="flex flex-wrap items-center justify-between p-3 border rounded-lg hover:bg-gray-50 gap-2">
+                <div class="flex items-center gap-3 min-w-0 flex-1">
+                    <span class="text-lg ${tx.type === 'income' ? 'text-green-600' : 'text-red-500'}">
+                        <i class="fas ${tx.type === 'income' ? 'fa-circle-up' : 'fa-circle-down'}"></i>
+                    </span>
+                    <div class="truncate">
+                        <p class="font-medium text-sm truncate">${tx.description}</p>
+                        <p class="text-xs text-gray-400">${tx.date} · ${tx.category}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="font-semibold ${tx.type === 'income' ? 'text-green-600' : 'text-red-500'}">$${tx.amount.toFixed(2)}</span>
+                    <button onclick="editTx('${tx.id}')" class="text-blue-400 hover:text-blue-600 text-sm"><i class="fas fa-edit"></i></button>
+                    <button onclick="deleteTx('${tx.id}')" class="text-red-300 hover:text-red-600 text-sm"><i class="fas fa-trash"></i></button>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // Expose functions to global for onclick handlers (simple)
+    window.editTx = (id) => { startEditTransaction(id); };
+    window.deleteTx = (id) => { deleteTransaction(id); };
+
+    // ---------- export CSV ----------
+    function exportCSV() {
+        if (!transactions.length) return alert('Nothing to export');
+        const headers = ['Type','Category','Amount','Date','Description'];
+        const rows = transactions.map(t => [t.type, t.category, t.amount, t.date, t.description]);
+        const csvContent = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `transactions_${currentUser?.username}_${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // ---------- export PDF monthly report (using jsPDF) ----------
+    function exportPDF() {
+        const monthInput = document.getElementById('pdf-month')?.value;
+        if (!monthInput) return alert('Choose a month');
+        const [year, month] = monthInput.split('-');
+        const monthName = new Date(year, month-1).toLocaleString('default', { month: 'long', year: 'numeric' });
+        const monthlyTxs = transactions.filter(t => t.date.startsWith(monthInput));
+        if (monthlyTxs.length === 0) return alert('No transactions for this month');
+
+        const income = monthlyTxs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+        const expense = monthlyTxs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        doc.setFontSize(18);
+        doc.text('Monthly expense report', 14, 20);
+        doc.setFontSize(11);
+        doc.text(`User: ${currentUser?.username}`, 14, 30);
+        doc.text(`Period: ${monthName}`, 14, 36);
+        doc.text(`Total income: $${income.toFixed(2)}`, 14, 44);
+        doc.text(`Total expense: $${expense.toFixed(2)}`, 14, 50);
+        doc.text(`Balance: $${(income - expense).toFixed(2)}`, 14, 56);
+
+        const tableData = monthlyTxs.map(t => [t.date, t.type, t.category, `$${t.amount.toFixed(2)}`, t.description]);
+        doc.autoTable({
+            head: [['Date', 'Type', 'Category', 'Amount', 'Description']],
+            body: tableData,
+            startY: 64,
+            styles: { fontSize: 9 },
+            headStyles: { fillColor: [59, 130, 246] }
+        });
+        doc.save(`report_${monthInput}.pdf`);
+    }
+
+    // initial render
+    renderApp();
+
+    // set default date in form to today (after dashboard render, if exists)
+    setTimeout(() => {
+        const dateField = document.getElementById('tx-date');
+        if (dateField && !dateField.value) {
+            const today = new Date().toISOString().split('T')[0];
+            dateField.value = today;
+        }
+    }, 100);
+})();
+</script>
+
+<!-- simple inline documentation -->
+<footer class="text-xs text-center text-gray-400 mt-6 max-w-6xl mx-auto p-2 border-t">
+    <p>📘 Mini Expense Tracker — fully client-side (localStorage). 
+    Authentication uses simple hash (demo only). Includes seed data, chart, CSV, PDF monthly report. 
+    Responsive design with Tailwind. For testing: login demo/demo or register new.</p>
+    <p class="mt-1">🔧 setup: just open this HTML file in any modern browser. No server required.</p>
+</footer>
+</body>
+</html>
